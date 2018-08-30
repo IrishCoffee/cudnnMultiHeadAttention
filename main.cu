@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <cstdio>
 const int THRESHOLD = 64;
-typedef char* cudnnStatus_t;
+typedef cudaError_t cudnnStatus_t;
 #define FINAL_MASK 0xffffffff
 
     __inline__ __device__
@@ -66,8 +66,17 @@ float blockReduceMax(float val)
 
 
     __global__
-void KeMultiHeadAttention(float *q, float *k, float *v, float *dst,
-        int beam_size, int n_steps, int qk_col, int v_col, int nhead, float scale)
+void KeMultiHeadAttention(
+        const float *q, 
+        const float *k, 
+        const float *v, 
+        float *dst,
+        const int beam_size, 
+        const int n_steps, 
+        const int qk_col, 
+        const int v_col, 
+        const int nhead, 
+        const float scale)
 {
     /* 
        Each block processes one head from one candidate.
@@ -110,7 +119,7 @@ void KeMultiHeadAttention(float *q, float *k, float *v, float *dst,
      */
 
     float summ = 0;
-    float* m2; 
+    const float* m2; 
     if(threadIdx.x < n_steps)
     {   
         m2 = k + candidate_id * qk_col * n_steps + threadIdx.x * qk_col + head_id * _dim_per_head;
@@ -168,8 +177,17 @@ void KeMultiHeadAttention(float *q, float *k, float *v, float *dst,
     }
 }
 
-cudnnStatus_t cudnnMultiHeadAttention(float *Q, float *K, float *V, float *dst, int beamsize,
-        int n_steps, int qk_col, int v_col, int nhead, float scaler)
+cudnnStatus_t cudnnMultiHeadAttention(
+        const float *Q, 
+        const float *K, 
+        const float *V, 
+        float *dst, 
+        const int beamsize,
+        const int n_steps, 
+        const int qk_col, 
+        const int v_col, 
+        const int nhead, 
+        const float scaler)
 {
     /* 
        We have beamsize candidates.
@@ -187,6 +205,9 @@ cudnnStatus_t cudnnMultiHeadAttention(float *Q, float *K, float *V, float *dst, 
     
     KeMultiHeadAttention<<<grid, block, shared_size, 0 >>> (Q, K, V, dst,
             beamsize, n_steps, qk_col, v_col, nhead, scaler);
+
+    cudaError_t error = cudaGetLastError();
+    return error;
 
 }
 int main()
