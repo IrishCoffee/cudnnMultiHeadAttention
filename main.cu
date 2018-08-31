@@ -1,7 +1,5 @@
 #include <cuda_runtime.h>
 #include <cstdio>
-const int THRESHOLD = 64;
-typedef cudaError_t cudnnStatus_t;
 #define FINAL_MASK 0xffffffff
 
     __inline__ __device__
@@ -70,13 +68,14 @@ void KeMultiHeadAttention(
         const float *q, 
         const float *k, 
         const float *v, 
-        float *dst,
         const int beam_size, 
         const int n_steps, 
         const int qk_col, 
         const int v_col, 
         const int nhead, 
-        const float scale)
+        const float scale,
+        const int THRESHOLD,
+        float *dst)
 {
     /* 
        Each block processes one head from one candidate.
@@ -176,18 +175,31 @@ void KeMultiHeadAttention(
         dst[candidate_id * v_col + head_id * _dim_per_head + threadIdx.x] = summ;
     }
 }
-
-cudnnStatus_t cudnnMultiHeadAttention(
+/*
+    Q: Query matrix of dimension beam_size * qk_col
+    K: Key matrix of dimension beam_size * (n_steps * qk_col)
+    V: Value matrix of dimension beam_size * (n_steps * v_col)
+    beamsize: Dimension used in beam size, also called the number of candidates
+    n_steps: The number of words that have already been decoded
+    qk_col: Dimension of the query/value feature
+    v_col: Dimension of the value feature
+    nhead: The number of heads
+    scaler: Pre-computed scaler 
+    THRESHOLD: Customer-defined value for soft-max maximum value calculation
+    dst: Output. The attention value of this query over all decoded word keys
+*/
+cudaError_t multiHeadAttention(
         const float *Q, 
         const float *K, 
         const float *V, 
-        float *dst, 
         const int beamsize,
         const int n_steps, 
         const int qk_col, 
         const int v_col, 
         const int nhead, 
-        const float scaler)
+        const float scaler,
+        const int THRESHOLD,
+        float *dst)
 {
     /* 
        We have beamsize candidates.
@@ -203,11 +215,10 @@ cudnnStatus_t cudnnMultiHeadAttention(
 
     int shared_size = sizeof(float) * ((qk_col / nhead) + n_steps);
     
-    KeMultiHeadAttention<<<grid, block, shared_size, 0 >>> (Q, K, V, dst,
-            beamsize, n_steps, qk_col, v_col, nhead, scaler);
+    KeMultiHeadAttention<<<grid, block, shared_size, 0 >>> (Q, K, V,
+            beamsize, n_steps, qk_col, v_col, nhead, scaler, THRESHOLD, dst);
 
-    cudaError_t error = cudaGetLastError();
-    return error;
+    return cudaGetLastError();
 
 }
 int main()
@@ -224,6 +235,16 @@ int main()
     const int nhead = 16;
     const int dim_feature = 1024;
     const int n_steps = 9;
+    
+    /* 
+       Calculate sqrt(d_k) 
+    */
+    float scaler = sqrt(nhead * 1.0 / dim_feature);
+
+    //qk_col can be different with v_col.
+    int qk_col = dim_feature;
+    int v_col = dim_feature;
+    int THRESHOLD = 64;
 
     float *dq, *dk, *dv, *dst;
     cudaMalloc((void**)&dq, sizeof(float) * beamsize * dim_feature);
@@ -231,13 +252,14 @@ int main()
     cudaMalloc((void**)&dv, sizeof(float) * beamsize * dim_feature * n_steps);
     cudaMalloc((void**)&dst, sizeof(float) * beamsize * dim_feature);
 
-
-
     float *hq, *hk, *hv;
     hq = (float*)malloc(sizeof(float) * beamsize * dim_feature);
     hk = (float*)malloc(sizeof(float) * beamsize * n_steps * dim_feature);
     hv = (float*)malloc(sizeof(float) * beamsize * n_steps * dim_feature);
 
+    /* 
+       Load the query, key and value matrices used in this step from text.
+    */
     FILE *fd = fopen("data/query.txt", "r");
     for(int i = 0; i < beamsize * dim_feature; ++i)
         fscanf(fd, "%f", &hq[i]);
@@ -254,17 +276,8 @@ int main()
     cudaMemcpy(dk, hk, sizeof(float) * beamsize * n_steps * dim_feature, cudaMemcpyHostToDevice);
     cudaMemcpy(dv, hv, sizeof(float) * beamsize * n_steps * dim_feature, cudaMemcpyHostToDevice);
 
-    /* 
-       Calculate sqrt(d_k) 
-    */
-    float scaler = sqrt(nhead * 1.0 / dim_feature);
-
-    //qk_col can be different with v_col.
-    int qk_col = dim_feature;
-    int v_col = dim_feature;
-    cudnnStatus_t error;
-
-    error = cudnnMultiHeadAttention(dq, dk, dv, dst, beamsize, n_steps, qk_col, v_col, nhead, scaler);
+    cudaError_t error;
+    error = multiHeadAttention(dq, dk, dv, beamsize, n_steps, qk_col, v_col, nhead, scaler, THRESHOLD, dst);
 
     float *h_dst = (float*)malloc(sizeof(float) * beamsize * dim_feature);
     cudaMemcpy(h_dst, dst, sizeof(float) * beamsize * dim_feature, cudaMemcpyDeviceToHost);
